@@ -150,7 +150,7 @@ class unit_gcn(nn.Module):
                 z = self.conv_d[i](torch.matmul(A2, A1).view(N, C, T, V))
                 y = z + y if y is not None else z
         else:
-            A = self.A.cuda(x.get_device()) * self.mask
+            A = self.A.to(x.device) * self.mask
             for i in range(self.num_subset):
                 A1 = A[i]
                 A2 = x.view(N, C * T, V)

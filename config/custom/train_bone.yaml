@@ -1,0 +1,35 @@
+work_dir: ./work_dir/custom/bone
+
+feeder: feeders.feeder_custom.Feeder
+train_feeder_args:
+  data_path: ./dataset/train_bone.npy
+  label_path: ./dataset/train_label.pkl
+  debug: False
+
+test_feeder_args:
+  data_path: ./dataset/val_bone.npy
+  label_path: ./dataset/val_label.pkl
+  debug: False
+
+model: model.agcn.Model
+model_args:
+  num_class: 7
+  num_point: 33
+  num_person: 1
+  graph: graph.blazepose.Graph
+  graph_args:
+    labeling_mode: spatial
+
+device: [0]
+batch_size: 16
+test_batch_size: 16
+
+base_lr: 0.1
+step: [20, 30, 40]
+num_epoch: 50
+weight_decay: 0.0005
+
+optimizer: SGD
+nesterov: True
+
+phase: train

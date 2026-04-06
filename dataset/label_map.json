@@ -1,0 +1,9 @@
+{
+    "bench_dips": 0,
+    "lunges": 1,
+    "pushup": 2,
+    "pushup_wrong_form": 3,
+    "squat": 4,
+    "squat_legs_too_narrow": 5,
+    "squat_legs_too_wide": 6
+}
