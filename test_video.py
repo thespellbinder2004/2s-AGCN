@@ -16,7 +16,7 @@ from model.agcn import Model
 VIDEO_PATH = "test_videos/lunges.mp4"
 MODEL_PATH = "pose_landmarker_heavy.task"
 WEIGHTS_PATH = "work_dir/custom/joint/model-39-600.pt"
-LABEL_MAP_PATH = "dataset/label_map.json"
+LABEL_MAP_PATH = "dataset_legacy/label_map.json"
 
 OUTPUT_VIDEO_PATH = "test_videos/lunges_out.mp4"
 

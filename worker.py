@@ -218,8 +218,8 @@ def run_ai_pipeline(video_abs_path: str, exercise_name: str):
     from model.agcn import Model
 
     MODEL_PATH = "pose_landmarker_heavy.task"
-    WEIGHTS_PATH = "work_dir/custom/joint/model-39-600.pt"
-    LABEL_MAP_PATH = "dataset/label_map.json"
+    WEIGHTS_PATH = "work_dir/custom/joint/model-89-2430.pt"
+    LABEL_MAP_PATH = "dataset_legacy/label_map.json"
 
     NUM_POINT = 33
     NUM_PERSON = 1
@@ -230,6 +230,11 @@ def run_ai_pipeline(video_abs_path: str, exercise_name: str):
     RIGHT_SHOULDER = 12
     LEFT_HIP = 23
     RIGHT_HIP = 24
+
+    LEFT_ELBOW = 13
+    RIGHT_ELBOW = 14
+    LEFT_WRIST = 15
+    RIGHT_WRIST = 16
 
     POSE_CONNECTIONS = [
         (0, 1), (0, 2), (1, 3), (2, 4),
@@ -246,11 +251,11 @@ def run_ai_pipeline(video_abs_path: str, exercise_name: str):
     ]
 
     SEGMENT_CONFIG = {
+        "bicep_curls": {"signal": "curl_distance", "start_state": "down", "motion_threshold": 0.06},
+        "bicep_curl": {"signal": "curl_distance", "start_state": "down", "motion_threshold": 0.06},
         "pushup": {"signal": "shoulder", "start_state": "up", "motion_threshold": 0.03},
         "push_up": {"signal": "shoulder", "start_state": "up", "motion_threshold": 0.03},
         "bench_dips": {"signal": "shoulder", "start_state": "up", "motion_threshold": 0.03},
-        "pullup": {"signal": "shoulder", "start_state": "down", "motion_threshold": 0.03},
-        "pull_up": {"signal": "shoulder", "start_state": "down", "motion_threshold": 0.03},
         "squat": {"signal": "hip", "start_state": "up", "motion_threshold": 0.03},
         "squat_wrong_form": {"signal": "hip", "start_state": "up", "motion_threshold": 0.03},
         "lunges": {"signal": "hip", "start_state": "up", "motion_threshold": 0.035},
@@ -264,13 +269,37 @@ def run_ai_pipeline(video_abs_path: str, exercise_name: str):
     }
 
     def normalize_exercise_name(name: str) -> str:
-        return name.strip().lower().replace(" ", "_")
+        name = name.strip().lower().replace(" ", "_")
+
+        aliases = {
+            "push_up": "pushup",
+
+            "bicep_curl": "bicep_curls",
+            "bicep_curls": "bicep_curls",
+
+            "bench_dip": "bench_dips",
+            "bench_dips": "bench_dips",
+        }
+
+        return aliases.get(name, name)
 
     def get_motion_signal(landmarks, signal_type):
         if signal_type == "shoulder":
             return (landmarks[LEFT_SHOULDER].y + landmarks[RIGHT_SHOULDER].y) / 2.0
         elif signal_type == "hip":
             return (landmarks[LEFT_HIP].y + landmarks[RIGHT_HIP].y) / 2.0
+        elif signal_type == "wrist":
+            return (landmarks[LEFT_WRIST].y + landmarks[RIGHT_WRIST].y) / 2.0
+        elif signal_type == "curl_distance":
+            left_dx = landmarks[LEFT_WRIST].x - landmarks[LEFT_SHOULDER].x
+            left_dy = landmarks[LEFT_WRIST].y - landmarks[LEFT_SHOULDER].y
+            right_dx = landmarks[RIGHT_WRIST].x - landmarks[RIGHT_SHOULDER].x
+            right_dy = landmarks[RIGHT_WRIST].y - landmarks[RIGHT_SHOULDER].y
+
+            left_dist = (left_dx ** 2 + left_dy ** 2) ** 0.5
+            right_dist = (right_dx ** 2 + right_dy ** 2) ** 0.5
+
+            return (left_dist + right_dist) / 2.0
         else:
             raise ValueError(f"Unknown signal_type: {signal_type}")
 
@@ -333,21 +362,48 @@ def run_ai_pipeline(video_abs_path: str, exercise_name: str):
         model.eval()
         return model, device
 
-    def predict_rep(model, device, seq):
+    def predict_rep(model, device, seq, allowed_class_names=None):
         seq = resample_sequence_interp(seq, FIXED_FRAMES)
         seq = normalize_pose_sequence(seq)
         seq = to_2sagcn_shape(seq)
         seq = np.expand_dims(seq, axis=0)
 
         x = torch.tensor(seq, dtype=torch.float32).to(device)
+
         with torch.no_grad():
             out = model(x)
-            logits = out[0].detach().cpu().numpy()
-            prob = torch.softmax(out, dim=1)
-            pred = torch.argmax(prob, dim=1).item()
-            conf = prob[0, pred].item()
+            logits_tensor = out[0]
+            logits = logits_tensor.detach().cpu().numpy()
 
-        return pred, conf, prob[0].cpu().numpy(), logits
+            full_prob = torch.softmax(out, dim=1)[0].cpu().numpy()
+
+            if allowed_class_names:
+                allowed_indices = [
+                    idx for idx, name in idx_to_class.items()
+                    if normalize_exercise_name(name) in allowed_class_names
+                ]
+
+                if allowed_indices:
+                    allowed_logits = logits_tensor[allowed_indices]
+                    allowed_probs = torch.softmax(allowed_logits, dim=0).cpu().numpy()
+
+                    best_allowed_pos = int(np.argmax(allowed_probs))
+                    pred = int(allowed_indices[best_allowed_pos])
+                    conf = float(allowed_probs[best_allowed_pos])
+
+                    prob = np.zeros_like(full_prob)
+                    for pos, class_idx in enumerate(allowed_indices):
+                        prob[class_idx] = allowed_probs[pos]
+                else:
+                    prob = full_prob
+                    pred = int(np.argmax(prob))
+                    conf = float(prob[pred])
+            else:
+                prob = full_prob
+                pred = int(np.argmax(prob))
+                conf = float(prob[pred])
+
+        return pred, conf, prob, logits
 
     def draw_pose(frame, landmarks, width, height):
         for lm in landmarks:
@@ -383,6 +439,26 @@ def run_ai_pipeline(video_abs_path: str, exercise_name: str):
     idx_to_class = {v: k for k, v in label_map.items()}
     num_class = len(label_map)
 
+    ALLOWED_CLASSES_BY_EXERCISE = {
+        "lunges": ["lunges", "lunges_body_leaning_forward"],
+        "lunge": ["lunges", "lunges_body_leaning_forward"],
+
+        "squat": [
+            "squat",
+            "squat_body_leaning_forward",
+            "squat_legs_too_narrow",
+            "squat_legs_too_wide",
+        ],
+
+        "pushup": ["pushup", "pushup_elbows_flared"],
+        "push_up": ["pushup", "pushup_elbows_flared"],
+
+        "bicep_curls": ["bicep_curls", "bicep_curls_elbows_moving"],
+        "bicep_curl": ["bicep_curls", "bicep_curls_elbows_moving"],
+
+        "bench_dips": ["bench_dips", "bench_dips_elbows_flared"],
+    }
+
     model, device = load_model(WEIGHTS_PATH, num_class=num_class)
 
     base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
@@ -394,6 +470,9 @@ def run_ai_pipeline(video_abs_path: str, exercise_name: str):
 
     normalized_name = normalize_exercise_name(exercise_name)
     cfg = SEGMENT_CONFIG.get(normalized_name, DEFAULT_CONFIG)
+
+    allowed_class_names = ALLOWED_CLASSES_BY_EXERCISE.get(normalized_name)
+
     signal_type = cfg["signal"]
     initial_state = cfg["start_state"]
     motion_threshold = float(cfg["motion_threshold"])
@@ -511,18 +590,46 @@ def run_ai_pipeline(video_abs_path: str, exercise_name: str):
 
                                 if len(seq) > 0:
                                     seq = np.array(seq, dtype=np.float32)
-                                    pred_idx, conf, probs, logits = predict_rep(model, device, seq)
+                                    pred_idx, conf, probs, logits = predict_rep(
+                                        model,
+                                        device,
+                                        seq,
+                                        allowed_class_names=allowed_class_names
+                                    )
                                     pred_name = idx_to_class.get(pred_idx, str(pred_idx))
 
-                                    top_indices = np.argsort(-probs)[:3]
-                                    top_predictions = [
-                                        {
-                                            "label": idx_to_class.get(int(idx), str(idx)),
-                                            "prob": float(probs[idx])
-                                        }
-                                        for idx in top_indices
-                                    ]
+                                    if allowed_class_names:
+                                        num_top = len(allowed_class_names)
+                                    else:
+                                        num_top = 3  # fallback
 
+                                    if allowed_class_names:
+                                        allowed_indices = [
+                                            idx for idx, name in idx_to_class.items()
+                                            if normalize_exercise_name(name) in allowed_class_names
+                                        ]
+
+                                        allowed_probs = probs[allowed_indices]
+
+                                        sorted_idx = np.argsort(-allowed_probs)
+
+                                        top_predictions = [
+                                            {
+                                                "label": idx_to_class.get(int(allowed_indices[i]),
+                                                                          str(allowed_indices[i])),
+                                                "prob": float(allowed_probs[i])
+                                            }
+                                            for i in sorted_idx[:len(allowed_indices)]
+                                        ]
+                                    else:
+                                        top_indices = np.argsort(-probs)[:3]
+                                        top_predictions = [
+                                            {
+                                                "label": idx_to_class.get(int(idx), str(idx)),
+                                                "prob": float(probs[idx])
+                                            }
+                                            for idx in top_indices
+                                        ]
                                     logit_map = {
                                         idx_to_class.get(i, str(i)): float(val)
                                         for i, val in enumerate(logits)
@@ -590,17 +697,46 @@ def run_ai_pipeline(video_abs_path: str, exercise_name: str):
 
                                 if len(seq) > 0:
                                     seq = np.array(seq, dtype=np.float32)
-                                    pred_idx, conf, probs, logits = predict_rep(model, device, seq)
+                                    pred_idx, conf, probs, logits = predict_rep(
+                                        model,
+                                        device,
+                                        seq,
+                                        allowed_class_names=allowed_class_names
+                                    )
                                     pred_name = idx_to_class.get(pred_idx, str(pred_idx))
 
-                                    top_indices = np.argsort(-probs)[:3]
-                                    top_predictions = [
-                                        {
-                                            "label": idx_to_class.get(int(idx), str(idx)),
-                                            "prob": float(probs[idx])
-                                        }
-                                        for idx in top_indices
-                                    ]
+                                    if allowed_class_names:
+                                        num_top = len(allowed_class_names)
+                                    else:
+                                        num_top = 3  # fallback
+
+                                    if allowed_class_names:
+                                        allowed_indices = [
+                                            idx for idx, name in idx_to_class.items()
+                                            if normalize_exercise_name(name) in allowed_class_names
+                                        ]
+
+                                        allowed_probs = probs[allowed_indices]
+
+                                        sorted_idx = np.argsort(-allowed_probs)
+
+                                        top_predictions = [
+                                            {
+                                                "label": idx_to_class.get(int(allowed_indices[i]),
+                                                                          str(allowed_indices[i])),
+                                                "prob": float(allowed_probs[i])
+                                            }
+                                            for i in sorted_idx[:len(allowed_indices)]
+                                        ]
+                                    else:
+                                        top_indices = np.argsort(-probs)[:3]
+                                        top_predictions = [
+                                            {
+                                                "label": idx_to_class.get(int(idx), str(idx)),
+                                                "prob": float(probs[idx])
+                                            }
+                                            for idx in top_indices
+                                        ]
 
                                     logit_map = {
                                         idx_to_class.get(i, str(i)): float(val)
@@ -703,7 +839,20 @@ def run_ai_pipeline(video_abs_path: str, exercise_name: str):
 
 # Helper functions
 def normalize_exercise_name(name: str) -> str:
-    return name.strip().lower().replace(" ", "_")
+    name = name.strip().lower().replace(" ", "_")
+
+    aliases = {
+        "push_up": "pushup",
+
+        "bicep_curl": "bicep_curls",
+        "bicep_curls": "bicep_curls",
+
+        "bench_dip": "bench_dips",
+        "bench_dips": "bench_dips",
+    }
+
+    return aliases.get(name, name)
+
 def update_session_global_score(conn, session_id: str):
     """
     Updates workout_sessions.global_score as the rounded average
@@ -778,6 +927,14 @@ def process_one_job():
             model_status="done"
         )
 
+        create_notifications_from_result(
+            conn=conn,
+            user_id=user_id,
+            session_id=session_id,
+            exercise_name=exercise_name,
+            result_json=result
+        )
+
         update_session_global_score(conn, session_id)
 
         mark_done(conn, video_id)
@@ -804,6 +961,127 @@ def process_one_job():
         if conn is not None:
             conn.close()
 
+# FOR NOTIFICATIONS
+def prettify_name(name: str) -> str:
+    return name.strip().replace("_", " ").title()
+
+def get_bad_form_feedback(predicted_name: str):
+    key = normalize_exercise_name(predicted_name)
+
+    feedbacks = {
+        'bench_dips_elbows_flared': {
+            'label': 'elbows flared',
+            'risk': 'Anterior Shoulder Capsular Strain',
+        },
+        'bicep_curls_elbows_moving': {
+            'label': 'elbows moving',
+            'risk': 'Anterior Shoulder Strain',
+        },
+        'lunges_body_leaning_forward': {
+            'label': 'body leaning forward',
+            'risk': 'Lumbar Strain',
+        },
+        'pushup_elbows_flared': {
+            'label': 'elbows flared',
+            'risk': 'Shoulder Impingement',
+        },
+        'squat_body_leaning_forward': {
+            'label': 'body leaning forward',
+            'risk': 'Erector Spinae Strain',
+        },
+        'squat_legs_too_narrow': {
+            'label': 'legs too narrow',
+            'risk': 'Meniscus Tear',
+        },
+        'squat_legs_too_wide': {
+            'label': 'legs too wide',
+            'risk': 'Hip Adductor Strain',
+        },
+    }
+
+    return feedbacks.get(key)
+
+
+def insert_notification(conn, user_id: int, session_id: str, title: str, message: str):
+    sql = """
+        INSERT INTO notifications (
+            user_id,
+            session_id,
+            title,
+            message,
+            is_read,
+            created_at
+        ) VALUES (%s, %s, %s, %s, 0, NOW())
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, (user_id, session_id, title, message))
+    conn.commit()
+
+
+def notification_exists(conn, user_id: int, session_id: str, title: str, message: str) -> bool:
+    sql = """
+        SELECT id
+        FROM notifications
+        WHERE user_id = %s
+          AND session_id = %s
+          AND title = %s
+          AND message = %s
+        LIMIT 1
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, (user_id, session_id, title, message))
+        row = cur.fetchone()
+    return row is not None
+
+
+
+
+
+
+def create_notifications_from_result(conn, user_id: int, session_id: str, exercise_name: str, result_json: dict):
+    reps = result_json.get("reps", []) or []
+    if not reps:
+        return
+
+    grouped_bad_forms = {}
+
+    for rep in reps:
+        if rep.get("is_good_form") is True:
+            continue
+
+        pred_name = str(rep.get("pred_name", "")).strip()
+        if not pred_name:
+            continue
+
+        grouped_bad_forms[pred_name] = grouped_bad_forms.get(pred_name, 0) + 1
+
+    for pred_name, count in grouped_bad_forms.items():
+        if count < 3:
+            continue
+
+        feedback = get_bad_form_feedback(pred_name)
+        if not feedback:
+            continue
+
+        exercise_display = prettify_name(exercise_name)
+        bad_form_label = feedback["label"]
+        risk = feedback["risk"]
+
+        title = f"{exercise_display} Wrong Form Detected"
+
+        if count == 1:
+            message = (
+                f"1 wrong-form {exercise_display.lower()} rep detected: "
+                f"{bad_form_label}. This could lead to {risk}."
+            )
+        else:
+            message = (
+                f"{count} wrong-form {exercise_display.lower()} reps detected: "
+                f"{bad_form_label}. This could lead to {risk}."
+            )
+
+        if not notification_exists(conn, user_id, session_id, title, message):
+            insert_notification(conn, user_id, session_id, title, message)
 
 # =========================
 # MAIN LOOP

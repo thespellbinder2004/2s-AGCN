@@ -13,7 +13,7 @@ test_feeder_args:
 
 model: model.agcn.Model
 model_args:
-  num_class: 7
+  num_class: 12
   num_point: 33
   num_person: 1
   graph: graph.blazepose.Graph
